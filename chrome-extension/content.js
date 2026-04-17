@@ -1,8 +1,9 @@
 /**
  * AstroSprite — 8-bit Astronaut Chrome Extension
- * Controls:
- *   Left-click + drag  →  move the astronaut
- *   Right-click        →  dismiss for this page
+ * Bounces around the viewport. Periodically an asteroid spawns; the astronaut
+ * seeks it, mines it, and resumes bouncing until the next one appears.
+ * Left-click + drag  →  move the astronaut
+ * Right-click        →  dismiss for this page
  */
 
 // ── Sprite pixel art ──────────────────────────────────────────────────────────
@@ -50,66 +51,278 @@ const FRAMES = [
   ],
 ];
 
-// ── Config ────────────────────────────────────────────────────────────────────
-const PIXEL_SIZE  = 5;
-const FPS_DELAY   = 60;
-const SPEED_MIN   = 0.3;
-const SPEED_MAX   = 1.0;
-const DRAG        = 0.994;
-const TURN_MIN    = 180;
-const TURN_MAX    = 350;
-const BOB_FREQ    = 0.07;
+// ── Asteroid pixel art ────────────────────────────────────────────────────────
+const ASTEROID_COLORS = {
+  B: '#111111',
+  G: '#888888',
+  D: '#555555',
+  L: '#BBBBBB',
+};
 
-const SPRITE_COLS = FRAMES[0][0].length;
-const SPRITE_ROWS = FRAMES[0].length;
-const CANVAS_W    = SPRITE_COLS * PIXEL_SIZE;
-const CANVAS_H    = SPRITE_ROWS * PIXEL_SIZE;
-
-// Behavior names
-const B_NORMAL   = 'NORMAL';
-const B_JETPACK  = 'JETPACK';
-const B_TUMBLE   = 'TUMBLE';
-const B_MOONWALK = 'MOONWALK';
-const B_SCARED   = 'SCARED';
-const B_FIDGET   = 'FIDGET';
-const B_SLEEPING = 'SLEEPING';
-
-const TIMED_BEHAVIORS = new Set([B_JETPACK, B_TUMBLE, B_MOONWALK, B_SCARED]);
-
-const SCARED_RADIUS = 90;   // px from sprite center to trigger scare
-const FIDGET_AFTER  = 450;  // idle ticks before fidgeting (~27 s)
-const SLEEP_AFTER   = 900;  // idle ticks before sleeping (~54 s)
-
-const QUIPS = [
-  'Houston, we have\na problem 😬',
-  'One small step...',
-  '🚀',
-  'The stars are\nbeautiful today ✨',
-  'Floating in space...',
-  'Beep boop 👾',
-  'To infinity!',
-  '*weightless noises*',
-  'Should probably\ncall mission control',
-  '🌍',
-  'Space is pretty\nchill tbh',
-  'Anyone got\nsnacks up here?',
+const ASTEROID_FRAME = [
+  '....BBBB....',
+  '...BLGGGBB..',
+  '..BGGGDGGGB.',
+  '.BGGGGGGGGBB',
+  'BGGDGGGGGGGB',
+  'BGGGGGDGGGGB',
+  '.BGGGGGGDGB.',
+  '..BGDGGGGB..',
+  '...BGGGGB...',
+  '....BBBB....',
 ];
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function randomVelocity() {
-  const angle = Math.random() * 2 * Math.PI;
-  const speed = SPEED_MIN + Math.random() * (SPEED_MAX - SPEED_MIN);
-  return [Math.cos(angle) * speed, Math.sin(angle) * speed];
-}
+// ── Rocket pixel art ──────────────────────────────────────────────────────────
+const ROCKET_COLORS = {
+  B: '#111111', W: '#EEEEFF', R: '#CC3333',
+  V: '#66BBEE', G: '#888888', S: '#CCCCCC',
+};
+
+const ROCKET_FRAME = [
+  '.....RR.....',
+  '....BRRB....',
+  '...BWWWWB...',
+  '...BWVVWB...',
+  '...BWVVWB...',
+  '...BWWWWB...',
+  '...BWWWWB...',
+  '...BWWWWB...',
+  '...BWWWWB...',
+  '...BWWWWB...',
+  '..BBBWWBBB..',
+  '.BGGBWWBGGB.',
+  'BGGGBWWBGGGB',
+  'BGGGBWWBGGGB',
+  '.BGGGWWGGGB.',
+  '..BSSSSSSB..',
+  '...BSSSSB...',
+  '....BBBB....',
+];
+
+// ── Launch pad pixel art ───────────────────────────────────────────────────────
+const LAUNCHPAD_COLORS = {
+  B: '#111111', S: '#AAAAAA', Y: '#FFD700', G: '#666666',
+};
+
+const LAUNCHPAD_FRAME = [
+  '..BBBBBBBBBBBBBBBB..',
+  '.BSSSSSSSSSSSSSSSSB.',
+  'BSSYYYYSSSSSSYYYYSSB',
+  'BSSYYYYSSSSSSYYYYSSB',
+  '.BGGGGGGGGGGGGGGGGB.',
+  'BBBBBBBBBBBBBBBBBBBB',
+];
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const PIXEL_SIZE      = 5;
+const ASTEROID_PIXEL  = 4;
+const ROCKET_PIXEL    = 5;
+const LAUNCHPAD_PIXEL = 5;
+const FPS_DELAY       = 60;
+
+const SPEED           = 2.5;   // px/tick while bouncing
+const SEEK_SPEED      = 3.2;   // px/tick while seeking
+
+const SPAWN_MIN       = 400;   // ticks before first / next asteroid (~24 s)
+const SPAWN_MAX       = 800;   // ticks (~48 s)
+const MINING_DURATION = 100;   // ticks spent mining (~6 s)
+const MINE_RADIUS     = 55;    // px center-to-center to trigger mining
+
+const SPRITE_COLS  = FRAMES[0][0].length;
+const SPRITE_ROWS  = FRAMES[0].length;
+const CANVAS_W     = SPRITE_COLS * PIXEL_SIZE;
+const CANVAS_H     = SPRITE_ROWS * PIXEL_SIZE;
+
+const ASTEROID_COLS = ASTEROID_FRAME[0].length;
+const ASTEROID_ROWS = ASTEROID_FRAME.length;
+const ASTEROID_W    = ASTEROID_COLS * ASTEROID_PIXEL;
+const ASTEROID_H    = ASTEROID_ROWS * ASTEROID_PIXEL;
+
+const ROCKET_COLS    = ROCKET_FRAME[0].length;
+const ROCKET_ROWS    = ROCKET_FRAME.length;
+const ROCKET_W       = ROCKET_COLS * ROCKET_PIXEL;
+const ROCKET_H       = ROCKET_ROWS * ROCKET_PIXEL;
+
+const LAUNCHPAD_COLS = LAUNCHPAD_FRAME[0].length;
+const LAUNCHPAD_ROWS = LAUNCHPAD_FRAME.length;
+const LAUNCHPAD_W    = LAUNCHPAD_COLS * LAUNCHPAD_PIXEL;
+const LAUNCHPAD_H    = LAUNCHPAD_ROWS * LAUNCHPAD_PIXEL;
+
+const WALL_ANGLE = { bottom: 0, right: 90, top: 180, left: 270 };
+
+const S_BOUNCING = 'BOUNCING';
+const S_SEEKING  = 'SEEKING';
+const S_MINING   = 'MINING';
+
 function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+// ── Asteroid ──────────────────────────────────────────────────────────────────
+class Asteroid {
+  constructor(avoidX, avoidY) {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    // Pick a position away from screen edges and the astronaut
+    let x, y, attempts = 0;
+    do {
+      x = randInt(100, vw - ASTEROID_W - 100);
+      y = randInt(100, vh - ASTEROID_H - 100);
+      attempts++;
+    } while (
+      attempts < 20 &&
+      Math.hypot(x + ASTEROID_W / 2 - avoidX, y + ASTEROID_H / 2 - avoidY) < 200
+    );
+
+    this.x = x;
+    this.y = y;
+
+    this.el = document.createElement('canvas');
+    this.el.width  = ASTEROID_W;
+    this.el.height = ASTEROID_H;
+    Object.assign(this.el.style, {
+      position:       'fixed',
+      left:           `${x}px`,
+      top:            `${y}px`,
+      zIndex:         '2147483646',
+      imageRendering: 'pixelated',
+      pointerEvents:  'none',
+    });
+    document.body.appendChild(this.el);
+    this._draw();
+  }
+
+  _draw() {
+    const ctx = this.el.getContext('2d');
+    for (let r = 0; r < ASTEROID_ROWS; r++) {
+      const row = ASTEROID_FRAME[r];
+      for (let c = 0; c < ASTEROID_COLS; c++) {
+        const color = ASTEROID_COLORS[row[c]];
+        if (!color) continue;
+        ctx.fillStyle = color;
+        ctx.fillRect(c * ASTEROID_PIXEL, r * ASTEROID_PIXEL, ASTEROID_PIXEL, ASTEROID_PIXEL);
+      }
+    }
+  }
+
+  // Explode and remove — rock chunks fly outward
+  burst() {
+    const cx = this.x + ASTEROID_W / 2;
+    const cy = this.y + ASTEROID_H / 2;
+    const chipColors = ['#888888', '#666666', '#AAAAAA', '#555555', '#999999'];
+    for (let i = 0; i < 12; i++) {
+      const angle = (i / 12) * 2 * Math.PI + Math.random() * 0.4;
+      const dist  = 25 + Math.random() * 35;
+      const el    = document.createElement('span');
+      el.textContent = ['·', '•', '▪', '▫'][randInt(0, 3)];
+      Object.assign(el.style, {
+        position:      'fixed',
+        left:          `${cx}px`,
+        top:           `${cy}px`,
+        color:         chipColors[randInt(0, chipColors.length - 1)],
+        fontSize:      `${6 + Math.random() * 7}px`,
+        pointerEvents: 'none',
+        zIndex:        '2147483646',
+        transition:    'opacity 0.7s ease-out, transform 0.7s ease-out',
+        opacity:       '1',
+        userSelect:    'none',
+        fontFamily:    'sans-serif',
+      });
+      document.body.appendChild(el);
+      requestAnimationFrame(() => {
+        el.style.opacity   = '0';
+        el.style.transform = `translate(${Math.cos(angle) * dist}px, ${Math.sin(angle) * dist}px)`;
+      });
+      setTimeout(() => el.remove(), 750);
+    }
+    this.el.remove();
+  }
+}
+
+// ── Rocket + Launch Pad ───────────────────────────────────────────────────────
+class Rocket {
+  constructor() {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    this.x      = Math.round((vw - ROCKET_W) / 2);
+    this.y      = vh - LAUNCHPAD_H - ROCKET_H;
+    this.width  = ROCKET_W;
+    this.height = ROCKET_H;
+
+    this._rocketEl = document.createElement('canvas');
+    this._rocketEl.width  = ROCKET_W;
+    this._rocketEl.height = ROCKET_H;
+    Object.assign(this._rocketEl.style, {
+      position:       'fixed',
+      left:           `${this.x}px`,
+      top:            `${this.y}px`,
+      zIndex:         '2147483645',
+      imageRendering: 'pixelated',
+      pointerEvents:  'none',
+    });
+    document.body.appendChild(this._rocketEl);
+    this._drawRocket();
+
+    const padX = Math.round((vw - LAUNCHPAD_W) / 2);
+    const padY = vh - LAUNCHPAD_H;
+    this._padEl = document.createElement('canvas');
+    this._padEl.width  = LAUNCHPAD_W;
+    this._padEl.height = LAUNCHPAD_H;
+    Object.assign(this._padEl.style, {
+      position:       'fixed',
+      left:           `${padX}px`,
+      top:            `${padY}px`,
+      zIndex:         '2147483645',
+      imageRendering: 'pixelated',
+      pointerEvents:  'none',
+    });
+    document.body.appendChild(this._padEl);
+    this._drawPad();
+  }
+
+  // Center of rocket body — for astronaut targeting later
+  get cx() { return this.x + ROCKET_W / 2; }
+  get cy() { return this.y + ROCKET_H / 2; }
+
+  _drawRocket() {
+    const ctx = this._rocketEl.getContext('2d');
+    for (let r = 0; r < ROCKET_ROWS; r++) {
+      const row = ROCKET_FRAME[r];
+      for (let c = 0; c < ROCKET_COLS; c++) {
+        const color = ROCKET_COLORS[row[c]];
+        if (!color) continue;
+        ctx.fillStyle = color;
+        ctx.fillRect(c * ROCKET_PIXEL, r * ROCKET_PIXEL, ROCKET_PIXEL, ROCKET_PIXEL);
+      }
+    }
+  }
+
+  _drawPad() {
+    const ctx = this._padEl.getContext('2d');
+    for (let r = 0; r < LAUNCHPAD_ROWS; r++) {
+      const row = LAUNCHPAD_FRAME[r];
+      for (let c = 0; c < LAUNCHPAD_COLS; c++) {
+        const color = LAUNCHPAD_COLORS[row[c]];
+        if (!color) continue;
+        ctx.fillStyle = color;
+        ctx.fillRect(c * LAUNCHPAD_PIXEL, r * LAUNCHPAD_PIXEL, LAUNCHPAD_PIXEL, LAUNCHPAD_PIXEL);
+      }
+    }
+  }
+
+  remove() {
+    this._rocketEl.remove();
+    this._padEl.remove();
+  }
+}
+
 // ── Desktop Pet ───────────────────────────────────────────────────────────────
 class DesktopPet {
-  constructor() {
-    // Build canvas
-    this.canvas = document.createElement('canvas');
+  constructor(rocket) {
+    this.rocket = rocket;
+    this.canvas        = document.createElement('canvas');
     this.canvas.width  = CANVAS_W;
     this.canvas.height = CANVAS_H;
     Object.assign(this.canvas.style, {
@@ -124,290 +337,215 @@ class DesktopPet {
     this.ctx = this.canvas.getContext('2d');
     document.body.appendChild(this.canvas);
 
-    // Position
-    this.x = Math.random() * Math.max(0, window.innerWidth  - CANVAS_W);
-    this.y = Math.random() * Math.max(0, window.innerHeight - CANVAS_H);
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
 
-    // Movement
-    [this.vx, this.vy] = randomVelocity();
-    this.bobPhase = Math.random() * 2 * Math.PI;
-    this.tick     = 0;
-    this.nextTurn = randInt(TURN_MIN, TURN_MAX);
-    this.frameIdx = 0;
+    // Start at bottom wall, center of screen
+    this.x = (vw - CANVAS_W) / 2;
+    this.y = vh - CANVAS_H;
 
-    // Cursor tracking
-    this.cursorX = -999;
-    this.cursorY = -999;
+    const angle = (Math.random() * 50 + 20) * Math.PI / 180;
+    this.vx = SPEED * Math.cos(angle) * (Math.random() < 0.5 ? 1 : -1);
+    this.vy = -SPEED * Math.sin(angle);
 
-    // Drag
+    this.spriteAngle = 0;
+    this.bobPhase    = 0;
+    this.frameIdx    = 0;
+
+    this.state          = S_BOUNCING;
+    this.asteroid       = null;
+    this.miningTicks    = 0;
+    this.nextAsteroidIn = randInt(SPAWN_MIN, SPAWN_MAX);
+    this._chipCd        = 0;
+    this.mineCount      = 0;
+
     this._dragging = false;
     this._dragOx   = 0;
     this._dragOy   = 0;
 
-    // Behavior state
-    this.behavior      = B_NORMAL;
-    this.behaviorTicks = 0;           // countdown; 0 = infinite (idle behaviors)
-    this.nextRandom    = randInt(250, 450);
-    this.idleTicks     = 0;
-    this.rotation      = 0;           // degrees, for TUMBLE
-    this.moonwalkFlip  = false;       // vertical flip active
-
-    // Scared cooldown (prevents rapid re-triggering)
-    this._scaredCd = 0;
-
-    // Overlay elements
-    this._speechEl   = null;
-    this._nextSpeech = randInt(500, 900);
-
-    // Sparkle / Zzz rate limiters
-    this._sparkleCd = 0;
-    this._zzzCd     = 0;
+    this._tally = document.createElement('div');
+    Object.assign(this._tally.style, {
+      position:   'fixed',
+      bottom:     '12px',
+      right:      '14px',
+      zIndex:     '2147483647',
+      fontFamily: '"Courier New", monospace',
+      fontSize:   '13px',
+      color:      '#FFD700',
+      textShadow: '0 0 4px #000, 1px 1px 0 #000',
+      pointerEvents: 'none',
+      userSelect: 'none',
+    });
+    this._tally.textContent = '☄ 0 mined';
+    document.body.appendChild(this._tally);
 
     this._bindEvents();
     this._updatePosition();
     this._step();
   }
 
-  // ── Behavior management ───────────────────────────────────────────────────
-  _startBehavior(name, minTicks, maxTicks) {
-    // SCARED can always interrupt; nothing else interrupts SCARED mid-flight
-    if (this.behavior === B_SCARED && name !== B_SCARED) return;
-    this._cleanupBehavior();
-    this.behavior      = name;
-    this.behaviorTicks = (minTicks === 0 && maxTicks === 0) ? 0 : randInt(minTicks, maxTicks);
-  }
-
-  _cleanupBehavior() {
-    if (this.behavior === B_TUMBLE) {
-      this.rotation = 0;
-      this.canvas.style.transform = '';
-    }
-    if (this.behavior === B_MOONWALK) {
-      this.moonwalkFlip = false;
-    }
-    // SLEEPING / FIDGET / SCARED / JETPACK / NORMAL need no special teardown
-  }
-
-  _wakeUp() {
-    if (this.behavior === B_SLEEPING || this.behavior === B_FIDGET) {
-      this._cleanupBehavior();
-      this.behavior      = B_NORMAL;
-      this.behaviorTicks = 0;
-    }
-    this.idleTicks = 0;
-  }
-
-  // ── Game loop ─────────────────────────────────────────────────────────────
+  // ── Main loop ─────────────────────────────────────────────────────────────
   _step() {
     if (!document.body.contains(this.canvas)) return;
 
     const vw = window.innerWidth;
     const vh = window.innerHeight;
 
-    // ── Idle counter ─────────────────────────────────────────────────────
-    if (!this._dragging) this.idleTicks++;
+    if (!this._dragging) {
+      if (this.state === S_BOUNCING) {
+        this._physicsBounce(vw, vh);
+        this.nextAsteroidIn--;
+        if (this.nextAsteroidIn <= 0) this._spawnAsteroid();
 
-    // ── Countdown timed behaviors ─────────────────────────────────────────
-    if (TIMED_BEHAVIORS.has(this.behavior) && this.behaviorTicks > 0) {
-      this.behaviorTicks--;
-      if (this.behaviorTicks === 0) {
-        this._cleanupBehavior();
-        this.behavior = B_NORMAL;
+      } else if (this.state === S_SEEKING) {
+        this._physicsSeek(vw, vh);
+        const ax   = this.asteroid.x + ASTEROID_W / 2;
+        const ay   = this.asteroid.y + ASTEROID_H / 2;
+        const dist = Math.hypot((this.x + CANVAS_W / 2) - ax, (this.y + CANVAS_H / 2) - ay);
+        if (dist < MINE_RADIUS) this._startMining();
+
+      } else if (this.state === S_MINING) {
+        this._physicsMining();
       }
     }
 
-    // ── Idle → FIDGET → SLEEPING ──────────────────────────────────────────
-    if (this.behavior === B_NORMAL && this.idleTicks >= FIDGET_AFTER) {
-      this.behavior = B_FIDGET;
-    }
-    if (this.behavior === B_FIDGET && this.idleTicks >= SLEEP_AFTER) {
-      this._cleanupBehavior();
-      this.behavior = B_SLEEPING;
-    }
-
-    // ── Random special behavior timer (skip while sleeping) ───────────────
-    if (this.behavior === B_NORMAL || this.behavior === B_FIDGET) {
-      this.nextRandom--;
-      if (this.nextRandom <= 0) {
-        this._triggerRandomBehavior();
-        this.nextRandom = randInt(250, 450);
-      }
-    }
-
-    // ── Cursor scare check (skip while sleeping or dragging) ──────────────
-    if (this._scaredCd > 0) {
-      this._scaredCd--;
-    } else if (!this._dragging && this.behavior !== B_SLEEPING) {
-      const mx   = this.x + CANVAS_W / 2;
-      const my   = this.y + CANVAS_H / 2;
-      const dist = Math.hypot(this.cursorX - mx, this.cursorY - my);
-      if (dist < SCARED_RADIUS) {
-        this._triggerScared(this.cursorX, this.cursorY, mx, my, dist);
-      }
-    }
-
-    // ── Speech bubble timer ───────────────────────────────────────────────
-    if (this.behavior !== B_SLEEPING) {
-      this._nextSpeech--;
-      if (this._nextSpeech <= 0) {
-        this._showSpeechBubble(QUIPS[randInt(0, QUIPS.length - 1)]);
-        this._nextSpeech = randInt(500, 900);
-      }
-    }
-
-    // ── Behavior-specific physics ─────────────────────────────────────────
-    this.bobPhase += BOB_FREQ;
-
-    if (this.behavior === B_TUMBLE) {
-      this.rotation = (this.rotation + 2.8) % 360;
-      this.canvas.style.transform = `rotate(${this.rotation}deg)`;
-      this._physicsNormal(vw, vh);
-
-    } else if (this.behavior === B_MOONWALK) {
-      this.moonwalkFlip = true;
-      this.vy -= 0.015; // gentle, constant upward pull toward ceiling
-      this._physicsNormal(vw, vh);
-
-    } else if (this.behavior === B_JETPACK) {
-      this._physicsNormal(vw, vh);
-      if (this._sparkleCd <= 0) {
-        this._spawnSparkle(
-          this.x + CANVAS_W / 2 + (Math.random() - 0.5) * CANVAS_W * 0.4,
-          this.y + CANVAS_H * 0.85
-        );
-        this._sparkleCd = 3;
-      }
-      this._sparkleCd--;
-
-    } else if (this.behavior === B_SCARED) {
-      this._physicsNormal(vw, vh);
-      if (this._sparkleCd <= 0) {
-        this._spawnSparkle(
-          this.x + CANVAS_W * 0.5,
-          this.y + CANVAS_H * 0.4,
-          ['!', '!!', '?!'][randInt(0,2)],
-          '#FF5555'
-        );
-        this._sparkleCd = 8;
-      }
-      this._sparkleCd--;
-
-    } else if (this.behavior === B_FIDGET) {
-      // Wiggle in place — heavy damping + tiny random nudges
-      this.vx = this.vx * 0.82 + (Math.random() - 0.5) * 0.4;
-      this.vy = this.vy * 0.82 + (Math.random() - 0.5) * 0.4;
-      this._physicsBoundsOnly(vw, vh);
-
-    } else if (this.behavior === B_SLEEPING) {
-      // Barely drift
-      this.vx *= 0.98;
-      this.vy *= 0.98;
-      const spd = Math.hypot(this.vx, this.vy);
-      if (spd > SPEED_MIN * 0.25) {
-        this.vx *= (SPEED_MIN * 0.25) / spd;
-        this.vy *= (SPEED_MIN * 0.25) / spd;
-      }
-      this._physicsBoundsOnly(vw, vh);
-      if (this._zzzCd <= 0) {
-        this._spawnZzz();
-        this._zzzCd = 80;
-      }
-      this._zzzCd--;
-
-    } else {
-      // B_NORMAL
-      this._physicsNormal(vw, vh);
-    }
-
-    // Leg animation frame
-    this.frameIdx = Math.cos(this.bobPhase) > 0 ? 0 : 1;
+    // Legs animate faster during mining
+    this.bobPhase += this.state === S_MINING ? 0.14 : 0.07;
+    this.frameIdx  = Math.cos(this.bobPhase) > 0 ? 0 : 1;
 
     this._updatePosition();
     this._draw();
     setTimeout(() => this._step(), FPS_DELAY);
   }
 
-  // ── Physics helpers ───────────────────────────────────────────────────────
-  _physicsNormal(vw, vh) {
-    this.vx *= DRAG;
-    this.vy *= DRAG;
+  // ── Physics modes ─────────────────────────────────────────────────────────
+  _physicsBounce(vw, vh) {
+    this.x += this.vx;
+    this.y += this.vy;
+    this._wallBounce(vw, vh);
+  }
 
-    const spd = Math.hypot(this.vx, this.vy);
-    if (spd < SPEED_MIN) {
-      const s = SPEED_MIN / (spd || 1);
-      this.vx *= s;
-      this.vy *= s;
-    }
+  _physicsSeek(vw, vh) {
+    // Gradually steer toward asteroid center
+    const ax = this.asteroid.x + ASTEROID_W / 2;
+    const ay = this.asteroid.y + ASTEROID_H / 2;
+    const dx = ax - (this.x + CANVAS_W / 2);
+    const dy = ay - (this.y + CANVAS_H / 2);
+    const d  = Math.hypot(dx, dy) || 1;
+
+    this.vx += (dx / d) * 0.25;
+    this.vy += (dy / d) * 0.25;
+    const spd = Math.hypot(this.vx, this.vy) || 1;
+    this.vx   = (this.vx / spd) * SEEK_SPEED;
+    this.vy   = (this.vy / spd) * SEEK_SPEED;
 
     this.x += this.vx;
     this.y += this.vy;
+    this._wallBounce(vw, vh);
+  }
 
-    if (this.x < 0) {
-      this.x = 0;
-      [this.vx, this.vy] = randomVelocity();
-      this.vx = Math.abs(this.vx);
-    } else if (this.x + CANVAS_W > vw) {
-      this.x = vw - CANVAS_W;
-      [this.vx, this.vy] = randomVelocity();
-      this.vx = -Math.abs(this.vx);
+  _physicsMining() {
+    this.miningTicks--;
+
+    // Wobble toward/away from asteroid (drilling motion)
+    const ax     = this.asteroid.x + ASTEROID_W / 2;
+    const ay     = this.asteroid.y + ASTEROID_H / 2;
+    const dx     = ax - (this.x + CANVAS_W / 2);
+    const dy     = ay - (this.y + CANVAS_H / 2);
+    const d      = Math.hypot(dx, dy) || 1;
+    const wobble = Math.sin(this.miningTicks * 0.4) * 1.2;
+    this.x += (dx / d) * wobble;
+    this.y += (dy / d) * wobble;
+
+    // Spawn rock chips periodically
+    if (this._chipCd <= 0) { this._spawnChip(); this._chipCd = 8; }
+    this._chipCd--;
+
+    if (this.miningTicks <= 0) this._finishMining();
+  }
+
+  // Reflect off viewport edges; update spriteAngle so feet face the wall hit
+  _wallBounce(vw, vh) {
+    if (this.y + CANVAS_H >= vh) {
+      this.y = vh - CANVAS_H; this.vy = -Math.abs(this.vy);
+      this.spriteAngle = WALL_ANGLE.bottom;
+    } else if (this.y <= 0) {
+      this.y = 0; this.vy = Math.abs(this.vy);
+      this.spriteAngle = WALL_ANGLE.top;
     }
-
-    if (this.y < 0) {
-      this.y = 0;
-      [this.vx, this.vy] = randomVelocity();
-      this.vy = Math.abs(this.vy);
-    } else if (this.y + CANVAS_H > vh) {
-      this.y = vh - CANVAS_H;
-      [this.vx, this.vy] = randomVelocity();
-      this.vy = -Math.abs(this.vy);
-    }
-
-    this.tick++;
-    if (this.tick >= this.nextTurn) {
-      this.tick     = 0;
-      this.nextTurn = randInt(TURN_MIN, TURN_MAX);
-      [this.vx, this.vy] = randomVelocity();
+    if (this.x + CANVAS_W >= vw) {
+      this.x = vw - CANVAS_W; this.vx = -Math.abs(this.vx);
+    } else if (this.x <= 0) {
+      this.x = 0; this.vx = Math.abs(this.vx);
     }
   }
 
-  _physicsBoundsOnly(vw, vh) {
-    this.x += this.vx;
-    this.y += this.vy;
-    if (this.x < 0)              { this.x = 0;            this.vx =  Math.abs(this.vx); }
-    if (this.x + CANVAS_W > vw)  { this.x = vw - CANVAS_W; this.vx = -Math.abs(this.vx); }
-    if (this.y < 0)              { this.y = 0;            this.vy =  Math.abs(this.vy); }
-    if (this.y + CANVAS_H > vh)  { this.y = vh - CANVAS_H; this.vy = -Math.abs(this.vy); }
+  // ── Asteroid lifecycle ────────────────────────────────────────────────────
+  _spawnAsteroid() {
+    const cx      = this.x + CANVAS_W / 2;
+    const cy      = this.y + CANVAS_H / 2;
+    this.asteroid = new Asteroid(cx, cy);
+    this.state    = S_SEEKING;
   }
 
-  // ── Behavior triggers ─────────────────────────────────────────────────────
-  _triggerRandomBehavior() {
-    const pick = [B_JETPACK, B_TUMBLE, B_MOONWALK][randInt(0, 2)];
-    if (pick === B_JETPACK) {
-      this._startBehavior(B_JETPACK, 55, 85);
-      const [bvx, bvy] = randomVelocity();
-      this.vx = bvx * 4.5;
-      this.vy = bvy * 4.5;
-    } else if (pick === B_TUMBLE) {
-      this._startBehavior(B_TUMBLE, 100, 150);
-    } else if (pick === B_MOONWALK) {
-      this._startBehavior(B_MOONWALK, 130, 190);
-      // Initial upward kick to get him moving toward the ceiling
-      this.vy = -Math.abs(this.vy) - 1.2;
-    }
-    this.idleTicks = 0;
+  _startMining() {
+    this.state       = S_MINING;
+    this.miningTicks = MINING_DURATION;
+    this.vx          = 0;
+    this.vy          = 0;
+
+    // Orient feet toward the asteroid so he looks like he's standing on it
+    const ax       = this.asteroid.x + ASTEROID_W / 2;
+    const ay       = this.asteroid.y + ASTEROID_H / 2;
+    const dx       = ax - (this.x + CANVAS_W / 2);
+    const dy       = ay - (this.y + CANVAS_H / 2);
+    const atan2Deg = Math.atan2(dy, dx) * 180 / Math.PI;
+    this.spriteAngle = ((90 - atan2Deg) % 360 + 360) % 360;
   }
 
-  _triggerScared(cx, cy, mx, my, dist) {
-    this._wakeUp();
-    this._startBehavior(B_SCARED, 35, 55);
-    const d    = dist || 1;
-    const kick = 3.5 + Math.random() * 2.5;
-    this.vx = ((mx - cx) / d) * kick;
-    this.vy = ((my - cy) / d) * kick;
-    this.tick      = 0;
-    this.nextTurn  = randInt(TURN_MIN, TURN_MAX);
-    this._scaredCd = 70;
-    this._showExclamation();
+  _finishMining() {
+    this.asteroid.burst();
+    this.asteroid       = null;
+    this.state          = S_BOUNCING;
+    this.nextAsteroidIn = randInt(SPAWN_MIN, SPAWN_MAX);
+    this.mineCount++;
+    this._tally.textContent = `☄ ${this.mineCount} mined`;
+
+    // Kick off in a random direction
+    const a  = Math.random() * 2 * Math.PI;
+    this.vx  = Math.cos(a) * SPEED;
+    this.vy  = Math.sin(a) * SPEED;
+  }
+
+  // ── Particles ─────────────────────────────────────────────────────────────
+  _spawnChip() {
+    if (!this.asteroid) return;
+    const cx     = this.asteroid.x + ASTEROID_W / 2;
+    const cy     = this.asteroid.y + ASTEROID_H / 2;
+    const colors = ['#888888', '#666666', '#AAAAAA', '#555555'];
+    const angle  = Math.random() * 2 * Math.PI;
+    const dist   = 12 + Math.random() * 18;
+    const el     = document.createElement('span');
+    el.textContent = ['·', '•', '▪'][randInt(0, 2)];
+    Object.assign(el.style, {
+      position:      'fixed',
+      left:          `${cx}px`,
+      top:           `${cy}px`,
+      color:         colors[randInt(0, colors.length - 1)],
+      fontSize:      `${5 + Math.random() * 5}px`,
+      pointerEvents: 'none',
+      zIndex:        '2147483646',
+      transition:    'opacity 0.5s ease-out, transform 0.5s ease-out',
+      opacity:       '1',
+      userSelect:    'none',
+      fontFamily:    'sans-serif',
+    });
+    document.body.appendChild(el);
+    requestAnimationFrame(() => {
+      el.style.opacity   = '0';
+      el.style.transform = `translate(${Math.cos(angle) * dist}px, ${Math.sin(angle) * dist}px)`;
+    });
+    setTimeout(() => el.remove(), 550);
   }
 
   // ── Drawing ───────────────────────────────────────────────────────────────
@@ -415,157 +553,24 @@ class DesktopPet {
     const ctx   = this.ctx;
     const frame = FRAMES[this.frameIdx];
     const flipX = this.vx < 0;
-    const sway  = Math.round(Math.sin(this.bobPhase) * 3);
 
     ctx.save();
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-
-    if (this.moonwalkFlip) {
-      // Flip vertically — he walks on the ceiling
-      ctx.translate(0, CANVAS_H);
-      ctx.scale(1, -1);
-    }
+    ctx.translate(CANVAS_W / 2, CANVAS_H / 2);
+    ctx.rotate((this.spriteAngle * Math.PI) / 180);
+    if (flipX) ctx.scale(-1, 1);
+    ctx.translate(-CANVAS_W / 2, -CANVAS_H / 2);
 
     for (let r = 0; r < frame.length; r++) {
       const row = frame[r];
       for (let c = 0; c < row.length; c++) {
         const color = COLORS[row[c]];
         if (!color) continue;
-        const dc = flipX ? (SPRITE_COLS - 1 - c) : c;
         ctx.fillStyle = color;
-        ctx.fillRect(dc * PIXEL_SIZE + sway, r * PIXEL_SIZE, PIXEL_SIZE, PIXEL_SIZE);
+        ctx.fillRect(c * PIXEL_SIZE, r * PIXEL_SIZE, PIXEL_SIZE, PIXEL_SIZE);
       }
     }
-
     ctx.restore();
-  }
-
-  // ── Overlay effects ───────────────────────────────────────────────────────
-  _spawnSparkle(sx, sy, char, color) {
-    const chars  = char  ? [char]      : ['✦', '✧', '⋆', '·', '*', '✨'];
-    const tColor = color || '#FFD700';
-    const el     = document.createElement('span');
-    el.textContent = chars[randInt(0, chars.length - 1)];
-    Object.assign(el.style, {
-      position:      'fixed',
-      left:          `${sx + (Math.random() - 0.5) * 16}px`,
-      top:           `${sy + (Math.random() - 0.5) * 16}px`,
-      color:         tColor,
-      fontSize:      `${7 + Math.random() * 8}px`,
-      pointerEvents: 'none',
-      zIndex:        '2147483646',
-      transition:    'opacity 0.85s ease-out, transform 0.85s ease-out',
-      opacity:       '1',
-      userSelect:    'none',
-      fontFamily:    'sans-serif',
-    });
-    document.body.appendChild(el);
-    requestAnimationFrame(() => {
-      el.style.opacity   = '0';
-      el.style.transform = `translate(${(Math.random() - 0.5) * 28}px, ${-12 - Math.random() * 22}px)`;
-    });
-    setTimeout(() => el.remove(), 900);
-  }
-
-  _spawnZzz() {
-    const el = document.createElement('span');
-    el.textContent = ['z', 'z', 'Z', 'Z', 'Zz'][randInt(0, 4)];
-    const size = randInt(11, 17);
-    Object.assign(el.style, {
-      position:      'fixed',
-      left:          `${this.x + CANVAS_W * 0.72 + Math.random() * 8}px`,
-      top:           `${this.y + 2}px`,
-      color:         '#AADDFF',
-      fontSize:      `${size}px`,
-      fontWeight:    'bold',
-      pointerEvents: 'none',
-      zIndex:        '2147483646',
-      transition:    'opacity 2s ease-out, transform 2s ease-out',
-      opacity:       '0.85',
-      userSelect:    'none',
-      fontFamily:    'sans-serif',
-      textShadow:    '0 0 5px #66BBEE',
-    });
-    document.body.appendChild(el);
-    requestAnimationFrame(() => {
-      el.style.opacity   = '0';
-      el.style.transform = `translate(${6 + Math.random() * 10}px, ${-18 - Math.random() * 18}px) scale(1.3)`;
-    });
-    setTimeout(() => el.remove(), 2100);
-  }
-
-  _showExclamation() {
-    const el = document.createElement('div');
-    el.textContent = '!';
-    Object.assign(el.style, {
-      position:      'fixed',
-      left:          `${this.x + CANVAS_W + 3}px`,
-      top:           `${this.y - 2}px`,
-      background:    '#FFD700',
-      color:         '#111',
-      fontWeight:    'bold',
-      fontSize:      '13px',
-      borderRadius:  '50%',
-      width:         '17px',
-      height:        '17px',
-      lineHeight:    '17px',
-      textAlign:     'center',
-      pointerEvents: 'none',
-      zIndex:        '2147483646',
-      boxShadow:     '0 0 4px rgba(0,0,0,0.45)',
-      transition:    'opacity 0.4s',
-      opacity:       '1',
-      userSelect:    'none',
-      fontFamily:    'sans-serif',
-    });
-    document.body.appendChild(el);
-    setTimeout(() => { el.style.opacity = '0'; }, 500);
-    setTimeout(() => el.remove(), 950);
-  }
-
-  _showSpeechBubble(text) {
-    // Remove previous bubble if still showing
-    if (this._speechEl) {
-      this._speechEl.remove();
-      this._speechEl = null;
-    }
-    const el = document.createElement('div');
-    el.textContent = text;
-    // Position right of sprite, but clamp to viewport
-    const bubbleLeft = Math.min(this.x + CANVAS_W + 8, window.innerWidth - 155);
-    const bubbleTop  = Math.max(4, this.y - 8);
-    Object.assign(el.style, {
-      position:      'fixed',
-      left:          `${bubbleLeft}px`,
-      top:           `${bubbleTop}px`,
-      background:    '#FFFFFF',
-      color:         '#111111',
-      fontSize:      '11px',
-      lineHeight:    '1.45',
-      padding:       '5px 8px',
-      borderRadius:  '10px',
-      border:        '2px solid #111',
-      pointerEvents: 'none',
-      zIndex:        '2147483646',
-      maxWidth:      '145px',
-      whiteSpace:    'pre-wrap',
-      boxShadow:     '2px 2px 0px #111',
-      opacity:       '1',
-      transition:    'opacity 0.4s',
-      userSelect:    'none',
-      fontFamily:    'sans-serif',
-    });
-    document.body.appendChild(el);
-    this._speechEl = el;
-
-    setTimeout(() => {
-      if (!el.parentNode) return;
-      el.style.opacity = '0';
-      setTimeout(() => {
-        el.remove();
-        if (this._speechEl === el) this._speechEl = null;
-      }, 450);
-    }, 4000);
   }
 
   // ── Position ──────────────────────────────────────────────────────────────
@@ -574,31 +579,55 @@ class DesktopPet {
     this.canvas.style.top  = `${Math.round(this.y)}px`;
   }
 
-  // ── Input events ──────────────────────────────────────────────────────────
-  _bindEvents() {
-    document.addEventListener('mousemove', (e) => {
-      this.cursorX = e.clientX;
-      this.cursorY = e.clientY;
-    });
+  // After drag, snap to nearest wall and abandon any active mission
+  _snapToNearestWall() {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const cx = this.x + CANVAS_W / 2;
+    const cy = this.y + CANVAS_H / 2;
 
-    // Right-click to dismiss
+    const dB = vh - cy, dT = cy, dR = vw - cx, dL = cx;
+    const m  = Math.min(dB, dT, dR, dL);
+
+    if (m === dB) {
+      this.y = vh - CANVAS_H; this.spriteAngle = WALL_ANGLE.bottom;
+      if (this.vy > 0) this.vy = -this.vy;
+    } else if (m === dT) {
+      this.y = 0; this.spriteAngle = WALL_ANGLE.top;
+      if (this.vy < 0) this.vy = -this.vy;
+    } else if (m === dR) {
+      this.x = vw - CANVAS_W; this.spriteAngle = WALL_ANGLE.right;
+      if (this.vx > 0) this.vx = -this.vx;
+    } else {
+      this.x = 0; this.spriteAngle = WALL_ANGLE.left;
+      if (this.vx < 0) this.vx = -this.vx;
+    }
+
+    // Abandon seek/mine mission on drag
+    if (this.state !== S_BOUNCING) {
+      if (this.asteroid) { this.asteroid.el.remove(); this.asteroid = null; }
+      this.state          = S_BOUNCING;
+      this.nextAsteroidIn = randInt(SPAWN_MIN, SPAWN_MAX);
+    }
+  }
+
+  // ── Input ─────────────────────────────────────────────────────────────────
+  _bindEvents() {
     this.canvas.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      if (this._speechEl) this._speechEl.remove();
+      if (this.asteroid) this.asteroid.el.remove();
+      if (this.rocket)   this.rocket.remove();
+      this._tally.remove();
       this.canvas.remove();
     });
 
-    // Left-click drag start
     this.canvas.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       this._dragging = true;
       this._dragOx   = e.offsetX;
       this._dragOy   = e.offsetY;
       this.canvas.style.cursor = 'grabbing';
-      this.vx = 0;
-      this.vy = 0;
-      this._wakeUp();
     });
 
     document.addEventListener('mousemove', (e) => {
@@ -612,8 +641,7 @@ class DesktopPet {
       if (!this._dragging) return;
       this._dragging = false;
       this.canvas.style.cursor = 'grab';
-      [this.vx, this.vy] = randomVelocity();
-      this.idleTicks = 0;
+      this._snapToNearestWall();
     });
   }
 }
@@ -621,9 +649,11 @@ class DesktopPet {
 // Guard against duplicate injection
 if (!window.__astroSpriteLoaded) {
   window.__astroSpriteLoaded = true;
-  if (document.body) {
-    new DesktopPet();
-  } else {
-    document.addEventListener('DOMContentLoaded', () => new DesktopPet());
-  }
+  const init = () => {
+    const rocket = new Rocket();
+    const pet    = new DesktopPet(rocket);
+    window.__astroSprite = { rocket, pet };
+  };
+  if (document.body) init();
+  else document.addEventListener('DOMContentLoaded', init);
 }
